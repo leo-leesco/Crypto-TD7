@@ -1,96 +1,52 @@
-use std::{
-    env::args,
-    fs::File,
-    io::{BufRead, BufReader},
-    path::Path,
-};
+use clap::Parser;
+use std::fs::File;
+use std::io::{Read, Write};
+use TD7::frodo::{Ciphertext, Frodo, SecretKey};
 
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305,
-    aead::{Aead, Payload},
-};
-use sha3::{
-    Shake128,
-    digest::{ExtendableOutput, Update, XofReader, generic_array::GenericArray},
-};
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Private key file path
+    #[arg(short, long)]
+    privatekey_file_path: String,
 
-fn main() {
-    let mut args = args();
+    /// Ciphertext file path
+    #[arg(short, long)]
+    ciphertext_file_path: String,
 
-    let sk_file = File::open(Path::new(
-        &args
-            .nth(1)
-            .expect("Please provide the path to the secret key file"),
-    ))
-    .expect("Could not open secret key file");
-    let lines: Vec<String> = BufReader::new(sk_file)
-        .lines()
-        .collect::<Result<_, _>>()
-        .expect("Could not collect lines from secret key file");
-    assert_eq!(
-        lines.len(),
-        4,
-        "The secret key file should have 4 lines (SK,S,PK,PKH)"
+    /// Shared secret key file path
+    #[arg(short, long)]
+    sharedsecretkey_file_path: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Initialize Frodo parameters
+    let frodo = Frodo::default();
+
+    // Read secret key
+    let mut sk_data = Vec::new();
+    let mut sk_file = File::open(&args.privatekey_file_path)?;
+    sk_file.read_to_end(&mut sk_data)?;
+    let secret_key = SecretKey::deserialize(&sk_data)?;
+
+    // Read ciphertext
+    let mut ct_data = Vec::new();
+    let mut ct_file = File::open(&args.ciphertext_file_path)?;
+    ct_file.read_to_end(&mut ct_data)?;
+    let ciphertext = Ciphertext::deserialize(&ct_data)?;
+
+    // Decapsulate
+    let shared_secret = frodo.decaps(&secret_key, &ciphertext);
+
+    // Save shared secret
+    let mut ss_file = File::create(&args.sharedsecretkey_file_path)?;
+    ss_file.write_all(&shared_secret)?;
+    println!(
+        "Shared secret written to {}",
+        args.sharedsecretkey_file_path
     );
-    let sk = hex::decode(lines.first().unwrap())
-        .expect("Could not read first line as a hex encoded secret key");
-    let s = hex::decode(lines.get(1).unwrap())
-        .expect("Could not read first line as a hex encoded nonce");
-    let pk = hex::decode(lines.get(1).unwrap())
-        .expect("Could not read first line as a hex encoded public key");
-    let pk_hash = hex::decode(lines.get(1).unwrap())
-        .expect("Could not read first line as a hex encoded public key hash");
 
-    let c = hex::decode(args.nth(2).expect("Please provide the ciphertext"))
-        .expect("Could not parse ciphertext as a hex string");
-
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&sk));
-    let m = cipher
-        .decrypt(
-            GenericArray::from_slice(&s),
-            Payload {
-                msg: &c,
-                aad: &[], // Associated data (if any)
-            },
-        )
-        .expect("Could not decrypt message");
-
-    let mut g2 = Shake128::default();
-    g2.update(&pk_hash);
-    g2.update(&m);
-    let mut rk = [0u8; 128];
-    g2.finalize_xof().read(&mut rk);
-
-    let r = &rk[..rk.len() / 2];
-    let k = &rk[rk.len() / 2..];
-
-    let mut f = Shake128::default();
-    f.update(&c);
-    f.update(k);
-    let mut k0 = [0u8; 16];
-    f.finalize_xof().read(&mut k0);
-
-    let mut f = Shake128::default();
-    f.update(&c);
-    f.update(&s);
-    let mut k1 = [0u8; 16];
-    f.finalize_xof().read(&mut k1);
-
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&pk));
-    let k = if c
-        == cipher
-            .encrypt(
-                GenericArray::from_slice(r),
-                Payload {
-                    msg: &m,
-                    aad: &[], // Associated data (if any)
-                },
-            )
-            .expect("Could not encrypt message")
-    {
-        k0
-    } else {
-        k1
-    };
-    println!("{}", hex::encode(k));
+    Ok(())
 }

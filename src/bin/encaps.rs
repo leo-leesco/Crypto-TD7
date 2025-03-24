@@ -1,59 +1,51 @@
-use std::env::args;
+use clap::Parser;
+use std::fs::File;
+use std::io::{Read, Write};
+use TD7::frodo::{Frodo, PublicKey};
 
-use TD6::{MESSAGE_SIZE, PUBLIC_KEY_LENGTH};
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305,
-    aead::{Aead, Payload},
-};
-use rand::{Rng, thread_rng};
-use sha3::{
-    Shake128,
-    digest::{ExtendableOutput, Update, XofReader, generic_array::GenericArray},
-};
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Public key file path
+    #[arg(short, long)]
+    publickey_file_path: String,
 
-fn main() {
-    let mut pk: [u8; PUBLIC_KEY_LENGTH] = [0; PUBLIC_KEY_LENGTH];
-    hex::decode_to_slice(
-        args().nth(1).expect("Please provide the public key"),
-        &mut pk,
-    )
-    .expect("Could not parse public key as a 32-byte hex string");
+    /// Ciphertext file path
+    #[arg(short, long)]
+    ciphertext_file_path: String,
 
-    let mut rng = thread_rng();
-    let mut m = [0u8; MESSAGE_SIZE];
-    rng.fill(&mut m);
+    /// Shared secret key file path
+    #[arg(short, long)]
+    sharedsecretkey_file_path: String,
+}
 
-    let mut g1 = Shake128::default();
-    g1.update(&pk);
-    let mut pk_hash = [0u8; 128];
-    g1.finalize_xof().read(&mut pk_hash);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
 
-    let mut g2 = Shake128::default();
-    g2.update(&pk_hash);
-    g2.update(&m);
-    let mut rk = [0u8; 128];
-    g2.finalize_xof().read(&mut rk);
+    // Initialize Frodo parameters
+    let frodo = Frodo::default();
 
-    let r = &rk[..rk.len() / 2];
-    let k = &rk[rk.len() / 2..];
+    // Read public key
+    let mut pk_data = Vec::new();
+    let mut pk_file = File::open(&args.publickey_file_path)?;
+    pk_file.read_to_end(&mut pk_data)?;
+    let public_key = PublicKey::deserialize(&pk_data)?;
 
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&pk));
-    let c = cipher
-        .encrypt(
-            GenericArray::from_slice(r),
-            Payload {
-                msg: &m,
-                aad: &[], // Associated data (if any)
-            },
-        )
-        .expect("Could not encrypt message");
+    // Encapsulate
+    let (ciphertext, shared_secret) = frodo.encaps(&public_key);
 
-    let mut f = Shake128::default();
-    f.update(&c);
-    f.update(k);
-    let mut k = [0u8; 16];
-    f.finalize_xof().read(&mut k);
+    // Save ciphertext
+    let mut ct_file = File::create(&args.ciphertext_file_path)?;
+    ct_file.write_all(&ciphertext.serialize())?;
+    println!("Ciphertext written to {}", args.ciphertext_file_path);
 
-    println!("{}", hex::encode(c));
-    println!("{}", hex::encode(k));
+    // Save shared secret
+    let mut ss_file = File::create(&args.sharedsecretkey_file_path)?;
+    ss_file.write_all(&shared_secret)?;
+    println!(
+        "Shared secret written to {}",
+        args.sharedsecretkey_file_path
+    );
+
+    Ok(())
 }
